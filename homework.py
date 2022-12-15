@@ -2,10 +2,15 @@ import logging
 import os
 import sys
 import time
+from json import JSONDecodeError
 
 import requests
 import telegram
 from dotenv import load_dotenv
+
+from exceptions import CheckEnvException
+from exceptions import ApiAnswerException
+from exceptions import AssistantException
 
 
 load_dotenv()
@@ -35,24 +40,6 @@ HOMEWORK_VERDICTS = {
 }
 
 
-class AssistantException(Exception):
-    """Обработка исключений логики работы ассистента."""
-
-    def __init__(self, message):
-        """Инициализация объекта."""
-        self.message = message
-        super().__init__(self.message)
-
-
-class ApiAnswerException(AssistantException):
-    """Обработка исключений вызова api."""
-
-    def __init__(self, message):
-        """Инициализация объекта."""
-        self.message = message
-        super().__init__(self.message)
-
-
 def check_tokens():
     """Проверка наличия всех необходимых переменных."""
     required_variables = {
@@ -60,15 +47,15 @@ def check_tokens():
         'TELEGRAM_TOKEN': TELEGRAM_TOKEN,
         'TELEGRAM_CHAT_ID': TELEGRAM_CHAT_ID,
     }
-    error_str = ', '.join(
-        [k for k, v in required_variables.items() if v is None]
-    )
-    if error_str:
-        logger.critical(
+    variables_none = [k for k, v in required_variables.items() if v is None]
+    if len(variables_none) > 0:
+        error_str = ', '.join(variables_none)
+        msg = (
             f'Отсутствует обязательная переменная окружения: {error_str}. '
-            'Программа принудительно остановлена. ', extra={'send_telegram': 1}
+            'Программа принудительно остановлена.'
         )
-        sys.exit(0)
+        raise CheckEnvException(msg)
+    return True
 
 
 def send_message(bot, message):
@@ -90,12 +77,17 @@ def get_api_answer(timestamp):
         response = requests.get(ENDPOINT, headers=HEADERS, params=payload)
         if response.status_code == 200:
             return response.json()
-        else:
-            msg = (
-                f'Сбой в работе программы: Эндпоинт {ENDPOINT} недоступен. '
-                'Код ответа API: {response.status_code}'
-            )
-            raise ApiAnswerException(msg)
+        msg = (
+            f'Сбой в работе программы: Эндпоинт {ENDPOINT} недоступен. '
+            'Код ответа API: {response.status_code}'
+        )
+        raise ApiAnswerException(msg)
+    except JSONDecodeError as err:
+        msg = (
+            'Ошибка конвертирования в json ответа от '
+            f'Эндпоинта {ENDPOINT}: {err}'
+        )
+        raise ApiAnswerException(msg)
     except Exception as err:
         msg = f'Ошибка при вызове Эндпоинта {ENDPOINT}: {err}'
         raise ApiAnswerException(msg)
@@ -106,40 +98,33 @@ def check_response(response):
     if not isinstance(response, dict):
         msg = f'В ответе пришли данные не в виде словаря: {response}'
         raise TypeError(msg)
-    elif (
-        response.get('homeworks') is None
-        or response.get('current_date') is None
-    ):
+    homeworks = response.get('homeworks')
+    current_date = response.get('current_date')
+    if homeworks is None or current_date is None:
         msg = f'Отсутствуют ожидаемые ключи в ответе API: {response}'
         raise TypeError(msg)
-    elif type(response['homeworks']) != list:
-        print(type(response['homeworks']))
+    if type(homeworks) != list:
         msg = f'В ответе поле homeworks не является списком: {response}'
         raise TypeError(msg)
-    elif len(response['homeworks']) == 0:
+    if len(homeworks) == 0:
         logger.debug('Нет обновления статусов в ответе API')
         return False
-    elif not isinstance(response['homeworks'][0], dict):
-        msg = (
-            'Список homeworks не содержит словарь: '
-            f'{response["homeworks"][0]}'
-        )
-        raise TypeError(msg)
-    elif (
-        response['homeworks'][0].get('homework_name') is None
-        or response['homeworks'][0].get('status') is None
-    ):
-        msg = f'Отсутствуют ожидаемые ключи в ответе API: {response}'
-        raise TypeError(msg)
     return True
 
 
 def parse_status(homework):
     """Проверка статуса проверки домашнего задания."""
-    verdict = HOMEWORK_VERDICTS.get(homework['status'])
-    if not homework.get('homework_name'):
-        msg = f'Отсутствуют ожидаемые ключи в ответе API: {homework}'
+    if not isinstance(homework, dict):
+        msg = f'Переменная homework не содержит словарь: {homework}'
+        raise TypeError(msg)
+    if homework.get('homework_name') is None or homework.get('status') is None:
+        msg = (
+            'Отсутствуют ожидаемые ключи (homework_name, status) '
+            f'в словаре homework: {homework}'
+        )
         raise AssistantException(msg)
+
+    verdict = HOMEWORK_VERDICTS.get(homework['status'])
     if verdict is None:
         msg = (
             'Неожиданный статус домашней работы, '
@@ -154,41 +139,31 @@ def parse_status(homework):
 
 def main():
     """Основная логика работы бота."""
-    check_tokens()
+    try:
+        check_tokens()
+    except CheckEnvException as error:
+        msg = f'Сбой в работе программы: {error}'
+        logger.critical(msg)
+        sys.exit(0)
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
     timestamp = int(time.time())
-
-    SEND_ERROR_API_MSG = True
-
+    send_error_api_msg = True
     while True:
         try:
             api_response = get_api_answer(timestamp)
-            # block for testing #
-            #
-            # api_response = {
-            #     'current_date': 111,
-            #     'homeworks': [
-            #         {
-            #             'homework_name': 'test1',
-            #             'status': 'rejected',
-            #         }
-            #     ]
-            # }
-            if api_response:
-                SEND_ERROR_API_MSG = True
-                check = check_response(api_response)
-                if check:
-                    status = parse_status(api_response['homeworks'][0])
-                    if status:
-                        send_message(bot, status)
-                    timestamp = api_response.get('current_date')
+            send_error_api_msg = True
+            if check_response(api_response):
+                status = parse_status(api_response['homeworks'][0])
+                if status:
+                    send_message(bot, status)
+                timestamp = api_response['current_date']
 
         except ApiAnswerException as error:
             msg = f'Сбой в работе программы: {error}'
             logger.error(msg)
-            if SEND_ERROR_API_MSG:
+            if send_error_api_msg:
                 send_message(bot, api_response)
-                SEND_ERROR_API_MSG = False
+                send_error_api_msg = False
         except Exception as error:
             msg = f'Сбой в работе программы: {error}'
             logger.error(msg)
