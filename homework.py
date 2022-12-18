@@ -8,8 +8,7 @@ import requests
 import telegram
 from dotenv import load_dotenv
 
-from exceptions import CheckEnvException
-from exceptions import ApiAnswerException
+from exceptions import CheckEnvException, ApiAnswerException
 from exceptions import AssistantException
 
 
@@ -103,7 +102,7 @@ def check_response(response):
     if homeworks is None or current_date is None:
         msg = f'Отсутствуют ожидаемые ключи в ответе API: {response}'
         raise TypeError(msg)
-    if type(homeworks) != list:
+    if not isinstance(homeworks, list):
         msg = f'В ответе поле homeworks не является списком: {response}'
         raise TypeError(msg)
     if len(homeworks) == 0:
