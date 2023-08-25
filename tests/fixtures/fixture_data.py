@@ -19,8 +19,8 @@ def current_timestamp():
 
 @pytest.fixture
 def homework_module():
-    import homework
-    return homework
+    import tg_bot_check_hw
+    return tg_bot_check_hw
 
 
 @pytest.fixture
